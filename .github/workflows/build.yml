@@ -27,7 +27,7 @@ jobs:
         id: version
         shell: python
         run: |
-          import re
+          import os, re
           with open('DictProcessor.py', encoding='utf-8') as f:
               content = f.read()
           match = re.search(r"^APP_VERSION\s*=\s*['\"]([^'\"]+)['\"]", content, re.MULTILINE)
