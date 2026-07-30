@@ -1,0 +1,89 @@
+name: 构建打包
+
+on:
+  push:
+    tags:
+      - 'v*'      # 推送 v 开头的 tag 时触发构建
+  workflow_dispatch:  # 支持手动触发
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 设置 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: 安装依赖
+        run: |
+          pip install pyinstaller pillow
+
+      - name: 提取版本号
+        id: version
+        shell: python
+        run: |
+          import re
+          with open('DictProcessor.py', encoding='utf-8') as f:
+              content = f.read()
+          match = re.search(r"^APP_VERSION\s*=\s*['\"]([^'\"]+)['\"]", content, re.MULTILINE)
+          version = match.group(1) if match else '0.0.0'
+          print(f'version={version}')
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+              f.write(f'version={version}\n')
+          # 同时写入 GITHUB_ENV 供后续步骤使用
+          with open(os.environ['GITHUB_ENV'], 'a') as f:
+              f.write(f'APP_VERSION={version}\n')
+
+      - name: PyInstaller 打包
+        run: |
+          pyinstaller --onefile --windowed --icon=app_icon.ico --name=词库处理工具 `
+            --exclude-module=numpy --exclude-module=pandas --exclude-module=matplotlib `
+            --exclude-module=scipy --exclude-module=PyQt5 --exclude-module=PyQt6 `
+            --exclude-module=PySide2 --exclude-module=PySide6 --exclude-module=django `
+            --exclude-module=flask --exclude-module=sqlalchemy --exclude-module=pytest `
+            --exclude-module=unittest --exclude-module=pydoc --exclude-module=pydoc_data `
+            --exclude-module=http --exclude-module=email --exclude-module=xml `
+            --exclude-module=xmlrpc --exclude-module=urllib --exclude-module=sqlite3 `
+            --exclude-module=ssl --exclude-module=asyncio --exclude-module=multiprocessing `
+            --exclude-module=tkinter.test --exclude-module=tkinter.tix `
+            --exclude-module=test --exclude-module=tests --exclude-module=distutils `
+            --exclude-module=lib2to3 --noconfirm DictProcessor.py
+
+      - name: 组装发布包
+        shell: pwsh
+        run: |
+          $ver = $env:APP_VERSION
+          $pkgDir = "词库处理工具_v$ver"
+          New-Item -ItemType Directory -Force -Path "$pkgDir"
+          # 复制 exe
+          Copy-Item "dist\词库处理工具.exe" "$pkgDir\"
+          # 复制预设文件夹
+          Copy-Item "预设" "$pkgDir\预设" -Recurse
+          # 打包 zip
+          Compress-Archive -Path "$pkgDir\*" -DestinationPath "$pkgDir.zip" -Force
+          Write-Host "打包完成: $pkgDir.zip"
+          # 显示大小
+          $size = (Get-Item "$pkgDir.zip").Length / 1MB
+          Write-Host "ZIP 大小: $([math]::Round($size, 2)) MB"
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: 词库处理工具_v${{ steps.version.outputs.version }}
+          path: 词库处理工具_v*.zip
+
+      - name: 创建 Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: 词库处理工具_v*.zip
+          name: 词库处理工具 v${{ steps.version.outputs.version }}
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
