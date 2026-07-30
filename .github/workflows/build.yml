@@ -60,31 +60,34 @@ jobs:
         shell: pwsh
         run: |
           $ver = $env:APP_VERSION
-          $pkgDir = "词库处理工具_v$ver"
+          # 压缩包名用英文（GitHub Release 对中文文件名不友好），内部 exe 名保持中文
+          $pkgName = "DictProcessor_v$ver"
+          $pkgDir = "staging"
           New-Item -ItemType Directory -Force -Path "$pkgDir"
-          # 复制 exe
+          # 复制 exe（名称保持中文）
           Copy-Item "dist\词库处理工具.exe" "$pkgDir\"
           # 复制预设文件夹
           Copy-Item "预设" "$pkgDir\预设" -Recurse
-          # 打包 zip
-          Compress-Archive -Path "$pkgDir\*" -DestinationPath "$pkgDir.zip" -Force
-          Write-Host "打包完成: $pkgDir.zip"
+          # 打包 zip（英文文件名）
+          Compress-Archive -Path "$pkgDir\*" -DestinationPath "$pkgName.zip" -Force
+          Remove-Item "$pkgDir" -Recurse -Force
+          Write-Host "打包完成: $pkgName.zip"
           # 显示大小
-          $size = (Get-Item "$pkgDir.zip").Length / 1MB
+          $size = (Get-Item "$pkgName.zip").Length / 1MB
           Write-Host "ZIP 大小: $([math]::Round($size, 2)) MB"
 
       - name: 上传构建产物
         uses: actions/upload-artifact@v4
         with:
-          name: 词库处理工具_v${{ steps.version.outputs.version }}
-          path: 词库处理工具_v*.zip
+          name: DictProcessor_v${{ steps.version.outputs.version }}
+          path: DictProcessor_v*.zip
 
       - name: 创建 Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: 词库处理工具_v*.zip
-          name: 词库处理工具 v${{ steps.version.outputs.version }}
+          files: DictProcessor_v*.zip
+          name: v${{ steps.version.outputs.version }}
           draft: false
           prerelease: false
         env:
