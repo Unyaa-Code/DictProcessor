@@ -9,6 +9,8 @@ on:
 jobs:
   build:
     runs-on: windows-latest
+    permissions:
+      contents: write       # 创建 Release 需要写入权限
 
     steps:
       - name: 检出代码
