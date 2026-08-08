@@ -1314,17 +1314,35 @@ class App:
 
     @staticmethod
     def _resolve_preset_dir():
-        """解析 预设 文件夹路径，兼容源码 / onedir / onefile 三种运行方式"""
-        base = os.path.dirname(os.path.abspath(__file__))
-        candidates = [base]
-        meipass = getattr(sys, '_MEIPASS', '')
-        if meipass:
-            candidates.append(meipass)
-        for c in candidates:
-            d = os.path.join(c, '预设')
+        """解析 预设 文件夹路径，兼容源码 / onedir / onefile 三种运行方式。
+
+        - 源码态：脚本与 预设 同目录。
+        - onedir（PyInstaller 6.x）：依赖与 datas 被收集到 exe 同级的 _internal 子目录，
+          故需额外探测 <根>/_internal/预设；同时以 sys.executable 所在目录作为可靠的兜底根。
+        - onefile：依赖解压到 _MEIPASS，仅当打包时通过 --add-data 包含 预设 才会存在。
+        """
+        # 候选根目录（去重、保序）
+        roots = []
+        # 模块文件所在目录：源码态=脚本目录；冻结态通常指向 exe 或 _internal 内的脚本
+        roots.append(os.path.dirname(os.path.abspath(__file__)))
+        if getattr(sys, 'frozen', False):
+            # 可执行文件所在目录最可靠：onedir 下预设可能被放在这里或其 _internal 子目录
+            roots.append(os.path.dirname(os.path.abspath(sys.executable)))
+            meipass = getattr(sys, '_MEIPASS', '')
+            if meipass:
+                roots.append(meipass)
+
+        for r in roots:
+            # 直接在根目录下找 预设
+            d = os.path.join(r, '预设')
             if os.path.isdir(d):
                 return d
-        return os.path.join(base, '预设')
+            # PyInstaller 6.x onedir 把收集内容放到 _internal 子目录
+            d = os.path.join(r, '_internal', '预设')
+            if os.path.isdir(d):
+                return d
+        # 都找不到时回退到模块目录（保持原有报错路径，便于定位）
+        return os.path.join(os.path.dirname(os.path.abspath(__file__)), '预设')
 
     def _measure_full(self):
         """测量同时显示所有可选选项行真实内容时的最大高度与宽度，测量后还原为占位状态"""
@@ -1424,6 +1442,13 @@ class App:
             self.cmb_preset['values'] = [''] + sorted(
                 f for f in os.listdir(self.preset_dir)
                 if os.path.isfile(os.path.join(self.preset_dir, f)))
+        else:
+            # 诊断：预设目录未找到时给出明确提示与解析路径，便于定位打包问题
+            messagebox.showwarning(
+                '预设目录未找到',
+                f'未能定位 预设 文件夹，载入预设功能暂不可用。\n\n'
+                f'程序解析到的路径：\n{self.preset_dir}\n\n'
+                f'请确认该路径下存在「预设」文件夹（打包后需与 exe 放在一起）。')
         # 未导入文件时，参考预览可手动编辑（带行号、限 1 万行）；导入文件后转只读
         self.preview_r = self._make_preview(
             self.frm_r, text_font, editable=True, on_overlimit=self._on_preview_overlimit)
