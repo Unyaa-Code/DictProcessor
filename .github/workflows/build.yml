@@ -2,8 +2,10 @@ name: 构建打包
 
 on:
   push:
+    branches:
+      - 'main'    # 每次推送到 main 都自动构建（便于预览 Actions 打包结果，不发布 Release）
     tags:
-      - 'v*'      # 推送 v 开头的 tag 时触发构建
+      - 'v*'      # 推送 v 开头的 tag 时触发构建并发布 Release
   workflow_dispatch:  # 支持手动触发
 
 jobs:
@@ -43,7 +45,9 @@ jobs:
 
       - name: PyInstaller 打包
         run: |
-          pyinstaller --onefile --windowed --icon=app_icon.ico --name=词库处理工具 `
+          # 使用 --onedir 而非 --onefile：onedir 依赖常驻磁盘、启动时无需整体解压到临时目录，
+          # 可避免 Windows 实时杀毒逐一扫描带来的数秒启动延迟（窗口程序 onefile 的通病）
+          pyinstaller --onedir --windowed --icon=app_icon.ico --name=词库处理工具 `
             --exclude-module=numpy --exclude-module=pandas --exclude-module=matplotlib `
             --exclude-module=scipy --exclude-module=PyQt5 --exclude-module=PyQt6 `
             --exclude-module=PySide2 --exclude-module=PySide6 --exclude-module=django `
@@ -64,10 +68,10 @@ jobs:
           $pkgName = "DictProcessor_v$ver"
           $pkgDir = "staging"
           New-Item -ItemType Directory -Force -Path "$pkgDir"
-          # 复制 exe（名称保持中文）
-          Copy-Item "dist\词库处理工具.exe" "$pkgDir\"
-          # 复制预设文件夹
-          Copy-Item "预设" "$pkgDir\预设" -Recurse
+          # onedir：复制整个 dist\词库处理工具 文件夹（含 exe 与全部依赖）
+          Copy-Item "dist\词库处理工具" "$pkgDir\词库处理工具" -Recurse
+          # 复制预设文件夹到 exe 同目录，保证运行时通过 __file__ 相对路径能找到 预设
+          Copy-Item "预设" "$pkgDir\词库处理工具\预设" -Recurse
           # 打包 zip（英文文件名）
           Compress-Archive -Path "$pkgDir\*" -DestinationPath "$pkgName.zip" -Force
           Remove-Item "$pkgDir" -Recurse -Force

@@ -940,11 +940,15 @@ class _OptionRow:
         self.frame = ttk.Frame(parent)
         # 所有子选项行都放在同一格 (0,0)，切换时仅显示当前操作的一行，保证始终在同一行
         self.frame.grid(row=0, column=0, sticky='ew', pady=(6, 0))
-        # 先构建并临时显示真实内容，量出其高度，再固定为行高
+        # 先构建真实内容（暂不测量高度）：所有选项行建好后由 _build_ui 统一刷新一次几何布局，
+        # 避免每行各自 update_idletasks 造成的多次全量重排，缩短启动时间
         self.content = ttk.Frame(self.frame)
         build_fn(self.content)
         self.content.pack(fill='x')
-        self.frame.update_idletasks()
+        self.h = 22  # 占位高度，_measure() 时替换为真实高度
+
+    def _measure(self):
+        """统一刷新后测量真实内容高度（必须在一次 update_idletasks 之后调用）"""
         self.h = max(self.content.winfo_reqheight(), 22)
         # 固定行高，禁止内容撑开框架（占位与真实内容等高，切换不跳动）
         self.frame.pack_propagate(False)
@@ -1246,8 +1250,9 @@ class App:
         self.target_enc = tk.StringVar(value='auto')
         self.ref_enc = tk.StringVar(value='auto')
         self.preset_var = tk.StringVar()  # 预设下拉框选中项
-        self.preset_dir = os.path.join(
-            os.path.dirname(os.path.abspath(__file__)), '预设')
+        # 预设目录解析：优先取脚本所在目录；PyInstaller onefile 下 __file__ 指向临时解压目录，
+        # 此时回退到 _MEIPASS 解压根，保证源码 / onedir / onefile 三种运行方式都能找到 预设 文件夹
+        self.preset_dir = self._resolve_preset_dir()
         self.last_output_path = None  # 最近一次输出文件路径，供「打开输出位置」使用
         self._about_win = None  # 关于窗口引用，避免重复弹出（已存在则聚焦）
         self.preview_only_enabled = tk.BooleanVar(value=True)  # 结果行数过滤：默认勾选
@@ -1306,6 +1311,20 @@ class App:
         # 路径标签随窗口尺寸自动换行
         self.root.bind('<Configure>', lambda e: self._update_path_wrap())
         self._update_path_wrap()
+
+    @staticmethod
+    def _resolve_preset_dir():
+        """解析 预设 文件夹路径，兼容源码 / onedir / onefile 三种运行方式"""
+        base = os.path.dirname(os.path.abspath(__file__))
+        candidates = [base]
+        meipass = getattr(sys, '_MEIPASS', '')
+        if meipass:
+            candidates.append(meipass)
+        for c in candidates:
+            d = os.path.join(c, '预设')
+            if os.path.isdir(d):
+                return d
+        return os.path.join(base, '预设')
 
     def _measure_full(self):
         """测量同时显示所有可选选项行真实内容时的最大高度与宽度，测量后还原为占位状态"""
@@ -1453,7 +1472,11 @@ class App:
             'dupcode': _OptionRow(self.frm_opt_rows, self._build_dupcode_options),
             'wordextract': _OptionRow(self.frm_opt_rows, self._build_wordextract_options),
         }
-        # 所有可选行统一到同一高度，视觉一致且无跳动
+        # 所有可选行统一到同一高度，视觉一致且无跳动。
+        # 先统一刷新一次几何布局，再测量各行真实高度（合并多次 update_idletasks 为一次，启动更快）
+        self.frm_opt_rows.update_idletasks()
+        for row in self.option_rows.values():
+            row._measure()
         _max_row_h = max(row.h for row in self.option_rows.values())
         for row in self.option_rows.values():
             row.set_height(_max_row_h)
