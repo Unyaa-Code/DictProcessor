@@ -48,6 +48,7 @@ jobs:
           # 使用 --onedir 而非 --onefile：onedir 依赖常驻磁盘、启动时无需整体解压到临时目录，
           # 可避免 Windows 实时杀毒逐一扫描带来的数秒启动延迟（窗口程序 onefile 的通病）
           pyinstaller --onedir --windowed --icon=app_icon.ico --name=词库处理工具 `
+            --optimize=2 `
             --exclude-module=numpy --exclude-module=pandas --exclude-module=matplotlib `
             --exclude-module=scipy --exclude-module=PyQt5 --exclude-module=PyQt6 `
             --exclude-module=PySide2 --exclude-module=PySide6 --exclude-module=django `
@@ -58,7 +59,11 @@ jobs:
             --exclude-module=ssl --exclude-module=asyncio --exclude-module=multiprocessing `
             --exclude-module=tkinter.test --exclude-module=tkinter.tix `
             --exclude-module=test --exclude-module=tests --exclude-module=distutils `
-            --exclude-module=lib2to3 --noconfirm DictProcessor.py
+            --exclude-module=lib2to3 `
+            --exclude-module=curses --exclude-module=dbm --exclude-module=idlelib `
+            --exclude-module=ensurepip --exclude-module=venv --exclude-module=wsgiref `
+            --exclude-module=turtle --exclude-module=turtledemo --exclude-module=antigravity `
+            --noconfirm DictProcessor.py
 
       - name: 组装发布包
         shell: pwsh
