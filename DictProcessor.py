@@ -2,6 +2,7 @@ import os
 import re
 import ctypes
 import io
+import itertools
 import contextlib
 import webbrowser
 import subprocess
@@ -53,6 +54,36 @@ ENCODING_CHOICES = [
     ('UTF-32 BE', 'utf-32-be'),
     ('ISO-8859-1', 'iso-8859-1'),
 ]
+
+# 词组编码功能的忽略设置
+# - 忽略标点符号：独立复选框（默认勾选）；「忽略表」输入框默认同时含标点 + 编辑符号
+# - 忽略表：单行输入框，直接填需剔除的字符；取消「忽略标点符号」时其中标点部分不生效
+IGNORE_PUNCT = '，。、；：！？…—～·（）《》【】「」『』〈〉〔〕“”‘’'
+DEFAULT_IGNORE_EXTRA = '·#@%&*+=_~^$|\\/<>{}'
+# 「忽略表」输入框默认内容（标点 + 编辑符号，保证默认不被「变少」）
+DEFAULT_IGNORE_BOX = IGNORE_PUNCT + DEFAULT_IGNORE_EXTRA
+
+
+# 词组编码：内置规则预设（一键载入到「生成规则」框）
+# 每行格式：范围 = 规则；范围如 2 / 3 / 4,99，规则用 [字序][码序] 拼接
+PHRASE_PRESETS = {
+    '五笔规则': (
+        '2 = [0][:2] + [1][:2]\n'
+        '3 = [0][0] + [1][0] + [-1][:2]\n'
+        '4,99 = [0:3][0] + [-1][0]'
+    ),
+    '两笔规则': (
+        '2 = [0][:2] + [1][:2]\n'
+        '3 = [0][:2] + [1][0] + [2][0]\n'
+        '4,99 = [0:3][0] + [-1][0]'
+    ),
+    '拼音规则': (
+        '2,99 = [:][:]'
+    ),
+    '速成规则': (
+        '2,99 = [:][0,-1]'
+    ),
+}
 
 
 def resolve_encoding(path, choice):
@@ -1149,6 +1180,7 @@ class App:
         'fullcode': '提取全码-处理结果.txt',
         'dupcode': '重码号-处理结果.txt',
         'wordextract': '简词提取结果',
+        'phrasecode': '词组编码结果.txt',
     }
 
     # 操作类型定义：新增操作只需在此登记
@@ -1162,6 +1194,7 @@ class App:
         ('fullcode', '提取全码（保留最长编码删除简码）', False),
         ('dupcode', '出重码号（重复编码加序号后缀）', False),
         ('wordextract', '简词提取（按正则提取并按词频排序）', True),
+        ('phrasecode', '词组编码（给无编码词条编码）', False),
     ]
     # 操作单选按钮在 3 行 3 列网格中的 (operation_id, 行, 列) 布局（左对齐）
     # 列号从 1 开始（0 列留空，原「操作类型:」标签已删除）
@@ -1170,6 +1203,7 @@ class App:
         ('difference', 0, 1), ('intersection', 0, 2), ('lookup', 0, 3),
         ('dupcode', 1, 1), ('shortcode', 1, 2), ('fullcode', 1, 3),
         ('wordextract', 2, 1),
+        ('phrasecode', 2, 2),
     ]
 
     def __init__(self, root):
@@ -1257,6 +1291,14 @@ class App:
         self._about_win = None  # 关于窗口引用，避免重复弹出（已存在则聚焦）
         self.preview_only_enabled = tk.BooleanVar(value=True)  # 结果行数过滤：默认勾选
         self.preview_only_threshold = tk.StringVar(value='100')  # 行数阈值，默认 100
+
+        # ---- 词组编码功能状态 ----
+        # 文件区直接复用标准 frm_files（待处理文件=待编码词组 / 参考文件=单字表），
+        # 仅通过 _on_operation_change 改标签，不新建独立文件区。
+        self._ui_pad = {'padx': 8, 'pady': 1}
+        self.allow_predef = tk.BooleanVar(value=True)    # 允许预定义编码（默认勾选）
+        self.ignore_punct = tk.BooleanVar(value=True)     # 忽略标点符号（默认勾选）
+        self.ignore_extra = tk.StringVar(value=DEFAULT_IGNORE_BOX)   # 忽略表输入框（默认含全部忽略字符）
 
         self._build_ui(text_font)
 
@@ -1360,34 +1402,38 @@ class App:
 
     def _build_ui(self, text_font):
         pad = {'padx': 8, 'pady': 1}
+        self._text_font = text_font
+        self._ui_pad = pad
 
         # ---- 文件选择区（两个并排，预览框不互相挤压）----
-        frm_files = ttk.Frame(self.root, padding=4)
+        self.frm_files = ttk.Frame(self.root, padding=4)
+        frm_files = self.frm_files
         # fill='x' 不 expand：文件区按内容高度紧凑显示，避免窗口变大时
         # 预览框被拉高导致下方出现大片无用空白；剩余空间交给结果预览区吸收。
         frm_files.pack(fill='x', **pad)
         frm_files.columnconfigure(0, weight=1)
         frm_files.columnconfigure(1, weight=1)
 
-        # 待处理文件
-        frm_t = ttk.LabelFrame(frm_files, text='待处理文件', padding=2)
-        frm_t.grid(row=0, column=0, sticky='nsew', padx=(0, 5))
-        frm_t_btn = ttk.Frame(frm_t)
+        # 待处理文件（词组编码模式复用为「待编码词组」）
+        self.frm_t = ttk.LabelFrame(frm_files, text='待处理文件', padding=2)
+        self.frm_t.grid(row=0, column=0, sticky='nsew', padx=(0, 5))
+        frm_t_btn = ttk.Frame(self.frm_t)
         frm_t_btn.pack(anchor='w')
-        ttk.Button(frm_t_btn, text='导入待处理文件', command=self._import_target).pack(
-            side='left')
+        self.btn_import_target = ttk.Button(
+            frm_t_btn, text='导入待处理文件', command=self._import_target)
+        self.btn_import_target.pack(side='left')
         ttk.Button(frm_t_btn, text='清空', width=6, command=self._clear_target).pack(
             side='left', padx=6)
-        self.lbl_target_path = ttk.Label(frm_t, textvariable=self.target_path,
+        self.lbl_target_path = ttk.Label(self.frm_t, textvariable=self.target_path,
                                          foreground='blue', wraplength=380,
                                          font=(CJK_FONT, 8))
         self.lbl_target_path.pack(anchor='w', pady=2)
-        ttk.Label(frm_t, textvariable=self.lines_t, foreground='gray').pack(anchor='w')
-        self.chk_target = ttk.Checkbutton(frm_t, text='忽略第二列（编码）',
+        ttk.Label(self.frm_t, textvariable=self.lines_t, foreground='gray').pack(anchor='w')
+        self.chk_target = ttk.Checkbutton(self.frm_t, text='忽略第二列（编码）',
                                           variable=self.ignore_target)
         self.chk_target.pack(anchor='w', pady=2)
         # 编码选择行：手动指定编码可解决自动检测误判导致的乱码
-        frm_t_enc = ttk.Frame(frm_t)
+        frm_t_enc = ttk.Frame(self.frm_t)
         frm_t_enc.pack(fill='x', pady=2)
         ttk.Label(frm_t_enc, text='编码:').pack(side='left')
         self.cmb_enc_t = ttk.Combobox(
@@ -1398,7 +1444,7 @@ class App:
         self.cmb_enc_t.bind('<<ComboboxSelected>>', lambda e: self._reload_target_preview())
         # 未导入文件时，待处理预览可手动编辑（带行号、限 1 万行）；导入文件后转只读
         self.preview_t = self._make_preview(
-            frm_t, text_font, editable=True, on_overlimit=self._on_preview_overlimit)
+            self.frm_t, text_font, editable=True, on_overlimit=self._on_preview_overlimit)
 
         # 参考文件
         self.frm_r = ttk.LabelFrame(frm_files, text='参考文件', padding=2)
@@ -1469,12 +1515,12 @@ class App:
                    command=self._show_about).place(relx=1.0, rely=0.5, anchor='e')
 
         # ---- 选项 ----
-        frm_opt = ttk.LabelFrame(self.root, text='处理选项', padding=8)
-        frm_opt.pack(fill='x', **pad)
+        self.frm_opt = ttk.LabelFrame(self.root, text='处理选项', padding=8)
+        self.frm_opt.pack(fill='x', **pad)
 
         # 操作类型：3 行 3 列网格（无「操作类型:」标签，上方「处理选项」已提示）
         # 新增操作只需在 App.OPERATIONS / App.OP_RADIO_LAYOUT 登记
-        frm_op_row = ttk.Frame(frm_opt)
+        frm_op_row = ttk.Frame(self.frm_opt)
         frm_op_row.pack(fill='x')
         op_labels = {oid: lbl for oid, lbl, _ in self.OPERATIONS}
         for oid, r, c in self.OP_RADIO_LAYOUT:
@@ -1487,7 +1533,7 @@ class App:
         # 可选选项行：所有操作的子选项叠放在同一容器格中，切换时只显示当前操作的子选项，
         # 始终位于同一行（不会上下错开）；各行统一高度，切换不跳动。
         # 新增选项：在 self.option_rows 中登记一行 build 函数即可。
-        self.frm_opt_rows = ttk.Frame(frm_opt)
+        self.frm_opt_rows = ttk.Frame(self.frm_opt)
         self.frm_opt_rows.pack(fill='x', pady=(6, 0))
         self.frm_opt_rows.columnconfigure(0, weight=1)
         self.option_rows = {
@@ -1496,6 +1542,7 @@ class App:
             'fullcode': _OptionRow(self.frm_opt_rows, self._build_fullcode_options),
             'dupcode': _OptionRow(self.frm_opt_rows, self._build_dupcode_options),
             'wordextract': _OptionRow(self.frm_opt_rows, self._build_wordextract_options),
+            'phrasecode': _OptionRow(self.frm_opt_rows, self._build_phrase_options),
         }
         # 所有可选行统一到同一高度，视觉一致且无跳动。
         # 先统一刷新一次几何布局，再测量各行真实高度（合并多次 update_idletasks 为一次，启动更快）
@@ -1507,7 +1554,8 @@ class App:
             row.set_height(_max_row_h)
 
         # ---- 输出文件名（wordextract 模式下文案改为「输出文件夹名」）----
-        frm_out = ttk.Frame(self.root, padding=8)
+        self.frm_out = ttk.Frame(self.root, padding=8)
+        frm_out = self.frm_out
         frm_out.pack(fill='x', **pad)
         self.lbl_out_name = ttk.Label(frm_out, text='输出文件名:')
         self.lbl_out_name.pack(side='left')
@@ -1527,7 +1575,8 @@ class App:
         self.btn_open_output.pack(side='left', padx=4)
 
         # ---- 结果行数过滤 ----
-        frm_filter = ttk.Frame(self.root)
+        self.frm_filter = ttk.Frame(self.root)
+        frm_filter = self.frm_filter
         frm_filter.pack(fill='x', padx=4, pady=(0, 4))
         vcmd = (self.root.register(self._validate_threshold), '%P')
         self.chk_preview_only = ttk.Checkbutton(
@@ -1544,7 +1593,8 @@ class App:
         # ---- 处理结果预览（与导入预览同高：8 行）----
         # fill='both' + expand=True：吸收窗口剩余空间，让结果预览框随窗口变大而变高，
         # 同时文件区保持紧凑，互换按钮行与处理选项自然上移。
-        frm_result = ttk.LabelFrame(self.root, text='处理结果预览', padding=8)
+        self.frm_result = ttk.LabelFrame(self.root, text='处理结果预览', padding=8)
+        frm_result = self.frm_result
         frm_result.pack(fill='both', expand=True, **pad)
         self.lbl_result_lines = ttk.Label(frm_result, text='', foreground='gray')
         # 初始无结果，先隐藏，避免占位留白（有结果后由 _set_result_lines 显示）
@@ -1596,7 +1646,7 @@ class App:
     def _needs_reference(self, op=None, short_scope=None):
         """判断当前操作是否需要参考文件"""
         op = op or self.operation.get()
-        if op in ('difference', 'intersection', 'lookup', 'wordextract'):
+        if op in ('difference', 'intersection', 'lookup', 'wordextract', 'phrasecode'):
             return True
         if op == 'shortcode':
             # 处理范围 1-4 需要参考列表，5-7 忽略参考
@@ -1623,6 +1673,21 @@ class App:
         # 已导入文件 或 已在预览框手动输入内容，均视为「已就绪」
         t_present = bool(t) or bool(self.preview_t.get_content().strip())
         r_present = bool(r) or bool(self.preview_r.get_content().strip())
+
+        # 词组编码：左框=单字表、右框=待编码词组，给出更准确的就绪提示
+        if self.operation.get() == 'phrasecode':
+            if not t_present:
+                self.status.config(
+                    text='请先导入单字表（左框），或在左侧预览框中手动输入内容。',
+                    foreground='gray')
+            elif not r_present:
+                self.status.config(
+                    text='请导入待编码词组（右框），或在右侧预览框中手动输入内容。',
+                    foreground='gray')
+            else:
+                self.status.config(text='已就绪，可点击「开始处理」。', foreground='green')
+            return
+
         if not t_present:
             self.status.config(
                 text='请先导入待处理文件，或在待处理预览框中手动输入内容。',
@@ -1808,9 +1873,14 @@ class App:
         - 切换操作类型时若用户未自定义文件名，则自动更新为该操作的默认名
         """
         op = self.operation.get()
-        # 上词频模式下右侧按钮文本改为「导入词频文件」，更直观；其他模式恢复「导入参考文件」
-        self.btn_import_ref.config(
-            text='导入词频文件' if op in ('lookup', 'wordextract') else '导入参考文件')
+        # 上词频模式下右侧按钮文本改为「导入词频文件」；词组编码复用标准文件区，
+        # 右框改为「单字表」、左框改为「待编码词组」（见下方标签切换）；其余恢复「导入参考文件」
+        if op == 'phrasecode':
+            self.btn_import_ref.config(text='导入待编码词组')
+        elif op in ('lookup', 'wordextract'):
+            self.btn_import_ref.config(text='导入词频文件')
+        else:
+            self.btn_import_ref.config(text='导入参考文件')
         # 简词提取输出为文件夹（合并模式除外），标签文案相应调整
         if op == 'wordextract' and not self.merge_results.get():
             self.lbl_out_name.config(text='输出文件夹名:')
@@ -1832,7 +1902,7 @@ class App:
             self.chk_preview_only.state(['!disabled'])
             self._update_preview_only_state()
         # 忽略第二列：上词频 / 简词提取 / 出简不出全 / 提取全码 / 出重码号 不需要，固定禁用并取消勾选
-        no_col_ops = {'lookup', 'wordextract', 'shortcode', 'fullcode', 'dupcode'}
+        no_col_ops = {'lookup', 'wordextract', 'shortcode', 'fullcode', 'dupcode', 'phrasecode'}
         if op in no_col_ops:
             self.ignore_target.set(False)
             self.ignore_ref.set(False)
@@ -1848,7 +1918,7 @@ class App:
         self._update_reference_state()
 
         # 若用户未自定义输出文件名，则更新为当前操作对应的默认名
-        if self._is_default_output_name():
+        if self._is_default_output_name() and op in self.DEFAULT_OUTPUT_NAMES:
             cur = self.output_name.get().strip()
             dir_part = os.path.dirname(cur) if cur else ''
             new_name = self.DEFAULT_OUTPUT_NAMES[op]
@@ -1856,6 +1926,17 @@ class App:
                 self.output_name.set(os.path.join(dir_part, new_name))
             else:
                 self.output_name.set(new_name)
+
+        # 词组编码直接复用标准文件区（与简词提取一致：不新建/不替换文件区），
+        # 仅按操作类型改标签：左框=待编码词组（主输入）、右框=单字表（取码字典）。
+        if op == 'phrasecode':
+            self.frm_t.config(text='单字表')
+            self.frm_r.config(text='待编码词组')
+            self.btn_import_target.config(text='导入单字表')
+        else:
+            self.frm_t.config(text='待处理文件')
+            self.frm_r.config(text='参考文件')
+            self.btn_import_target.config(text='导入待处理文件')
 
     def _build_lookup_options(self, parent):
         """上词频选项行内容：未匹配填充值 + 排序复选框"""
@@ -2424,7 +2505,9 @@ class App:
                 self.frm_r.config(style='TLabelframe')
             except Exception:
                 pass
-            self.frm_r.config(text='参考文件')
+            # 词组编码下右框是「待编码词组」，不要被这里重置为「参考文件」
+            if self.operation.get() != 'phrasecode':
+                self.frm_r.config(text='参考文件')
             self.lbl_ref_path.config(foreground='#0000ff')
             self.lbl_ref_lines.config(foreground=grey)
             self.preview_r.text.config(fg='#000000', bg='#ffffff')
@@ -2545,6 +2628,11 @@ class App:
         # 简词提取输出为文件夹（多文件），走独立流程，不适用常规单文件/缓冲逻辑
         if op == 'wordextract':
             self._run_wordextract(target_path, ref_path, target_enc, ref_enc, manual)
+            return
+
+        # 词组编码走独立流程（读取单字表/词组预览，输出到文件并复用标准结果预览）
+        if op == 'phrasecode':
+            self._run_phrasecode()
             return
 
         # 手动模式：结果直接生成在内存并呈现到预览，不写文件；
@@ -2854,6 +2942,512 @@ class App:
             self.preview_result.set_editable(False)
             self._set_preview(self.preview_result, '（无结果）')
             self._set_result_lines('')
+
+
+    # =====================================================================
+    #  词组编码功能（单字表 → 待编码词组，按切片规则生成词组码）
+    # =====================================================================
+    def _build_phrase_options(self, parent):
+        """词组编码选项行：左侧规则输入框（多行可编辑，默认五笔规则）+ 右侧预设按钮 / 复选框 / 忽略表输入框，
+        布局镜像「简词提取」的选项行（与正则框同位置、同结构，作为「处理选项」内的子选项）。"""
+        pad = {'padx': 8, 'pady': 1}
+        frm_rule = ttk.LabelFrame(
+            parent, text='取码规则（生成规则，默认五笔规则）', padding=8)
+        frm_rule.pack(fill='x', **pad)
+        frm_left = ttk.Frame(frm_rule)
+        frm_left.pack(side='left', fill='y')
+        # 左侧：规则输入框（默认填充五笔规则），点击「词组生成规则:」标签查看语法说明
+        lbl_rule = ttk.Label(frm_left, text='生成规则:', cursor='hand2')
+        lbl_rule.pack(side='left')
+        lbl_rule.bind('<Button-1>', lambda e: self._show_phrase_rule_help())
+        lbl_rule.bind('<Enter>', lambda e: lbl_rule.config(foreground='#0066cc'))
+        lbl_rule.bind('<Leave>', lambda e: lbl_rule.config(foreground=''))
+        self.txt_phrase_rule = _Preview(
+            frm_left, (CJK_FONT, 9), height=3, width=44,
+            line_numbers=False, editable=True,
+            on_overlimit=self._on_preview_overlimit)
+        self.txt_phrase_rule.frame.pack(side='left', fill='y', padx=4)
+        # 默认填充五笔规则
+        self.txt_phrase_rule.set_content(PHRASE_PRESETS['五笔规则'])
+
+        # 右侧：两行控件（与左侧等高）
+        frm_right = ttk.Frame(frm_left)
+        frm_right.pack(side='left', fill='y', padx=(12, 0))
+        frm_r1 = ttk.Frame(frm_right)
+        frm_r1.pack(anchor='w')
+        # 预设规则改为「加载默认规则」子菜单（五笔/两笔/拼音/速成；ttk 自带下拉箭头）
+        mb_preset = ttk.Menubutton(frm_r1, text='加载默认规则')
+        mb_preset.pack(side='left', padx=4)
+        m_preset = tk.Menu(mb_preset, tearoff=0)
+        for _name in PHRASE_PRESETS:
+            m_preset.add_command(
+                label=_name, command=lambda n=_name: self._phrase_load_preset(n))
+        mb_preset.config(menu=m_preset)
+        frm_r2 = ttk.Frame(frm_right)
+        frm_r2.pack(anchor='w', pady=(2, 0))
+        self.chk_allow_predef = ttk.Checkbutton(
+            frm_r2, text='允许预定义编码', variable=self.allow_predef)
+        self.chk_allow_predef.pack(side='left', padx=4)
+        # 忽略标点符号：主页面复选框（默认勾选），不再放进二级菜单
+        self.chk_ignore_punct = ttk.Checkbutton(
+            frm_r2, text='忽略标点符号', variable=self.ignore_punct)
+        self.chk_ignore_punct.pack(side='left', padx=4)
+        # 忽略表：单行输入框，直接填需剔除的字符（不再用子菜单/弹窗）
+        # 「忽略标点符号」取消勾选时，整张忽略表禁用（变灰、不生效）
+        frm_r3 = ttk.Frame(frm_right)
+        frm_r3.pack(anchor='w', pady=(2, 0))
+        self.lbl_ignore_extra = ttk.Label(frm_r3, text='忽略表:')
+        self.lbl_ignore_extra.pack(side='left')
+        self.ent_ignore_extra = ttk.Entry(
+            frm_r3, textvariable=self.ignore_extra, width=40)
+        self.ent_ignore_extra.pack(side='left', padx=4, fill='x', expand=True)
+        self._update_ignore_state()
+        self.ignore_punct.trace_add('write', lambda *a: self._update_ignore_state())
+
+    # ---- 忽略表状态联动 ----
+    def _update_ignore_state(self):
+        """「忽略标点符号」勾选时忽略表可用；取消勾选时整张忽略表变灰、不生效"""
+        if self.ignore_punct.get():
+            self.ent_ignore_extra.state(['!disabled'])
+            self.lbl_ignore_extra.state(['!disabled'])
+        else:
+            self.ent_ignore_extra.state(['disabled'])
+            self.lbl_ignore_extra.state(['disabled'])
+
+    # ---- 规则预设 / 忽略表编辑 / 规则语法说明 ----
+    def _phrase_load_preset(self, name):
+        """把指定预设规则载入规则输入框（覆盖当前内容）"""
+        if name in PHRASE_PRESETS:
+            self.txt_phrase_rule.set_content(PHRASE_PRESETS[name])
+
+    def _show_phrase_rule_help(self):
+        """弹出词组生成规则语法说明窗口"""
+        top = tk.Toplevel(self.root)
+        top.title('词组生成规则语法')
+        top.transient(self.root)
+        top.grab_set()
+        frm = ttk.Frame(top, padding=10)
+        frm.pack(fill='both', expand=True)
+        ttk.Label(frm, text='词组生成规则语法', font=(CJK_FONT, 11, 'bold')).pack(
+            anchor='w', pady=(0, 6))
+        help_text = (
+            '【词组编码是做什么的】\n'
+            '根据左侧「单字表」（每行：单字 + 它的编码）自动为右侧「待编码词组」生成编码。\n'
+            '例：单字表有  中=khh / 国=lgd，词组「中国」就能按规则拼出 khh.lgd 之类的编码。\n\n'
+            '【规则写在哪】\n'
+            '主界面「生成规则」框，每行一条规则，格式：   字数范围 = 取码规则\n'
+            '程序从上往下逐条匹配，第一个命中的规则就用于该词组。\n\n'
+            '一、字数范围（决定这条规则管几个字的词组）\n'
+            '  • 单个数字 N        如 2      → 只用于二字词\n'
+            '  • A,B             如 4,99    → 用于 4 到 99 字词（含两端）\n'
+            '  • 一端留空          如 ,99    → 1 到 99 字词；如 4, → 四字及以上\n'
+            '  常见写法：2 管二字词，3 管三字词，4,99 管四字及更长的词。\n\n'
+            '二、取码规则（用 [字序][码序] 从每个单字取码，多个区块用 + 连接）\n'
+            '  [字序] 选「第几个字」：\n'
+            '      0      第一个字        -1     最后一个字\n'
+            '      :      所有字          0:3    前三个字        1,2    第2、第3个字\n'
+            '      也支持任意切片：2:4（第3、4个字）、2:（第3个到末字）、:4（前4个字）\n'
+            '  [码序] 选「取该字的哪几码」（索引从 0 开始，即 0=第1码/1=第2码…）：\n'
+            '      :2     前两码          :      全部码\n'
+            '      0      第一码          0,-1   首码+末码\n'
+            '      也支持任意切片：2:4（第3、4码）、2:（第3码到末码）、:4（前4码）\n'
+            '  + 把多个区块拼起来，如 [0][:2] + [1][:2] = 「首字前两码」连「次字前两码」。\n'
+            '  例：[0][2:4] = 取首字编码里第3、4码（如 字=PBFF → 取 "FF"）；\n'
+            '      [0:2][2:4] = 取前两个字的「第3、4码」再拼接。\n\n'
+            '三、单字编码怎么取（重要）\n'
+            '  单字表里一个字可能有多码（如五笔有两码/三码/全码）。取码时：\n'
+            '  • 写 :2 只想取两码 → 优先用两码，没有两码就退回一码；\n'
+            '  • 同长度有多码（如重码）会全部保留，用空格隔开。\n\n'
+            '【一步步算给你看】（用五笔规则算三字词「计算机」）\n'
+            '  单字表：计=YF / 算=THA / 机=SM\n'
+            '  规则  3 = [0][0] + [1][0] + [-1][:2]\n'
+            '   → [0][0]  首字「计」首码        = Y\n'
+            '   → [1][0]  第2字「算」首码       = T\n'
+            '   → [-1][:2] 末字「机」前两码      = SM\n'
+            '   → 结果：YTSM\n\n'
+            '【其他选项】\n'
+            '  • 忽略标点符号（默认勾选）：编码前先把词组里的标点、空格删掉再处理；\n'
+            '    取消勾选则标点不再被忽略（即使「忽略表」框里还显示着它们）。\n'
+            '  • 忽略表：额外要删除的字符，直接填在框里（默认已含常见编辑符号）。\n'
+            '  • 允许预定义编码（默认勾选）：词组行本身若已带编码，则原样保留、不再重算。\n\n'
+            '【一键预设】点「加载默认规则」可选 五笔 / 两笔 / 拼音 / 速成 规则直接填入。'
+        )
+        txt = tk.Text(frm, wrap='word', width=82, height=30)
+        txt.pack(fill='both', expand=True)
+        txt.insert('1.0', help_text)
+        txt.config(state='disabled')
+        ttk.Button(frm, text='关闭', command=top.destroy).pack(pady=(6, 0))
+        top.update_idletasks()
+        top.minsize(520, 440)
+        top.geometry('+%d+%d' % (self.root.winfo_rootx() + 60,
+                                  self.root.winfo_rooty() + 60))
+
+    # ---- 生成 & 保存 ----
+    def _phrase_build_report(self, report):
+        """把生成报告字典整理为可读文本（缺失字 / 未覆盖长度 / 计数等）"""
+        rep = []
+        rep.append(f'已生成: {report["generated"]:,} 行')
+        rep.append(f'预定义保留: {report["predef"]:,} 行')
+        if report['empty']:
+            rep.append(f'空词组（忽略后为空）: {report["empty"]:,} 行')
+        if report['failed']:
+            rep.append(f'规则不适用（字序越界等）: {report["failed"]:,} 行')
+        if report['unmatched']:
+            rep.append('— 未覆盖长度（跳过）—')
+            for length in sorted(report['unmatched']):
+                cnt, samples = report['unmatched'][length]
+                rep.append(f'长度 {length}: {cnt:,} 个  样例: {", ".join(samples[:5])}')
+        if report['missing']:
+            rep.append('— 含未收录单字（跳过）—')
+            for ch in sorted(report['missing']):
+                cnt, samples = report['missing'][ch]
+                rep.append(f'缺字[{ch}]: {cnt:,} 次  样例: {", ".join(samples[:5])}')
+        if not (report['unmatched'] or report['missing'] or report['empty'] or report['failed']):
+            rep.append('全部词组均已成功处理。')
+        return '\n'.join(rep)
+
+    def _run_phrasecode(self):
+        """词组编码：按规则框生成词组编码，输出到文件并刷新标准结果预览（与简词提取共用开始处理按钮）"""
+        out_lines, report = self._phrase_generate()
+        if out_lines is None:
+            messagebox.showwarning('提示', report)
+            return
+        text = '\n'.join(out_lines)
+        op_name = '词组编码'
+        # 输出路径（与标准逻辑一致：相对路径落在当前工作目录）
+        out = self.output_name.get().strip() or self.DEFAULT_OUTPUT_NAMES['phrasecode']
+        if os.path.isabs(out):
+            out_path = out
+        else:
+            out_path = os.path.join(os.getcwd(), out)
+        if not out_path.lower().endswith(('.txt', '.yaml')):
+            out_path += '.txt'
+        # 清空上一次结果预览
+        self.preview_result.set_editable(False)
+        self._set_preview(self.preview_result, '')
+        self._set_result_lines('（处理中…）')
+        self.status.config(text=f'正在执行{op_name}处理...', foreground='black')
+        self.root.update_idletasks()
+        # 结果行数过滤：启用且行数不足阈值时仅输出到预览，不保存文件
+        if self.preview_only_enabled.get():
+            total_lines = len(out_lines)
+            thr = int(self.preview_only_threshold.get() or '0')
+            if total_lines < thr:
+                self.last_output_path = None
+                self.btn_open_output.state(['disabled'])
+                self._show_manual_result(text)
+                self.status.config(
+                    text=(f'{op_name}完成：生成 {report["generated"]:,} 行，'
+                          f'预定义保留 {report["predef"]:,} 行；未覆盖 '
+                          f'{sum(v[0] for v in report["unmatched"].values()):,} 行，'
+                          f'缺字 {sum(v[0] for v in report["missing"].values()):,} 行，'
+                          f'空词组 {report["empty"]:,} 行。\n'
+                          f'（共 {total_lines:,} 行，少于阈值 {thr:,} 行，'
+                          f'仅输出到结果预览框，未保存文件）'),
+                    foreground='green')
+                self._phrase_show_report(self._phrase_build_report(report))
+                return
+        # 写文件（唯一文件名，避免覆盖）
+        out_path = get_unique_output_path(out_path)
+        try:
+            with open(out_path, 'w', encoding='utf-8') as f:
+                f.write(text + '\n')
+        except Exception as e:
+            messagebox.showerror('保存失败', str(e))
+            return
+        self.last_output_path = out_path
+        self.btn_open_output.state(['!disabled'])
+        self._preview_result_file(out_path, manual=False)
+        unmatched_n = sum(v[0] for v in report['unmatched'].values())
+        missing_n = sum(v[0] for v in report['missing'].values())
+        self.status.config(
+            text=(f'{op_name}完成：生成 {report["generated"]:,} 行，'
+                  f'预定义保留 {report["predef"]:,} 行；未覆盖 {unmatched_n:,} 行，'
+                  f'缺字 {missing_n:,} 行，空词组 {report["empty"]:,} 行。\n'
+                  f'结果已保存至: {out_path}'),
+            foreground='green')
+        self._phrase_show_report(self._phrase_build_report(report))
+
+    def _phrase_show_report(self, report_text):
+        """生成完成后以弹窗展示处理报告（缺失字 / 未覆盖长度 / 计数等）"""
+        top = tk.Toplevel(self.root)
+        top.title('处理报告')
+        top.transient(self.root)
+        top.grab_set()
+        frm = ttk.Frame(top, padding=10)
+        frm.pack(fill='both', expand=True)
+        ttk.Label(frm, text='处理报告', font=(CJK_FONT, 11, 'bold')).pack(
+            anchor='w', pady=(0, 6))
+        txt = tk.Text(frm, wrap='word', width=72, height=18)
+        txt.pack(fill='both', expand=True)
+        txt.insert('1.0', report_text)
+        txt.config(state='disabled')
+        ttk.Button(frm, text='关闭', command=top.destroy).pack(pady=(6, 0))
+        top.update_idletasks()
+        top.minsize(420, 200)
+        # 点击窗口外不关闭，但允许用关闭按钮；定位到父窗口中心附近
+        top.geometry('+%d+%d' % (self.root.winfo_rootx() + 60,
+                                  self.root.winfo_rooty() + 60))
+
+    # ---- 切片取码引擎 ----
+    def _phrase_parse_char_table(self):
+        """解析单字表：每行「单字 编码」，同字可多行 → {字: [码1, 码2, ...]}"""
+        table = {}
+        # 单字表复用标准文件区左框（待处理文件 → 词组编码下为「单字表」）
+        text = self.preview_t.get_content()
+        for line in text.splitlines():
+            s = line.strip()
+            if not s or s.startswith('#'):
+                continue
+            parts = s.split(None, 1)
+            if len(parts) < 2:
+                continue
+            ch, code = parts[0], parts[1].strip()
+            if not ch or not code:
+                continue
+            table.setdefault(ch, []).append(code)
+        return table
+
+    @staticmethod
+    def _phrase_parse_rule(rule):
+        """把规则字符串拆成 token 列表 [(字序表达式, 码序表达式), ...]"""
+        tokens = []
+        for m in re.finditer(r'\[([^\]]*)\]\[([^\]]*)\]', rule):
+            tokens.append((m.group(1).strip(), m.group(2).strip()))
+        if not tokens:
+            raise ValueError('未找到 [字序][码序] 单元，请按说明书填写规则')
+        return tokens
+
+    @staticmethod
+    def _phrase_match_range(length, range_str):
+        """判断词组长度是否落在范围内：'A,B'闭区间 / 'N'精确 / 'A,'到无穷 / ',B'到B"""
+        s = (range_str or '').strip()
+        if not s:
+            return False
+        if ',' in s:
+            a, _, b = s.partition(',')
+            a, b = a.strip(), b.strip()
+            lo = int(a) if a else 1
+            hi = int(b) if b else None
+            if length < lo:
+                return False
+            if hi is not None and length > hi:
+                return False
+            return True
+        try:
+            return length == int(s)
+        except ValueError:
+            return False
+
+    @staticmethod
+    def _phrase_parse_slice(expr, n):
+        """把切片表达式（如 ':', ':2', '2:', '1:3'）解析为 slice 对象"""
+        a, _, b = expr.partition(':')
+        start = int(a) if a != '' else None
+        stop = int(b) if b != '' else None
+        return slice(start, stop)
+
+    @staticmethod
+    def _phrase_eval_char_idx(expr, chars):
+        """解析字序表达式 → 字符索引列表（安全防越界；越界则整体返回空）"""
+        n = len(chars)
+        if ',' in expr:
+            parts = [p for p in expr.split(',') if p != '']
+            try:
+                idxs = [int(p) for p in parts]
+            except ValueError:
+                return []
+            res = []
+            for i in idxs:
+                if i < -n or i >= n:
+                    return []
+                res.append(i if i >= 0 else n + i)
+            return res
+        if ':' in expr:
+            try:
+                sl = App._phrase_parse_slice(expr, n)
+            except (ValueError, TypeError):
+                return []
+            return list(range(n))[sl]
+        try:
+            i = int(expr)
+        except ValueError:
+            return []
+        if i < -n or i >= n:
+            return []
+        return [i if i >= 0 else n + i]
+
+    @staticmethod
+    def _phrase_eval_code_idx(code, expr):
+        """解析码序表达式 → 对单条码字符串取出一个片段（安全防越界；越界返回 None）"""
+        n = len(code)
+        if ',' in expr:
+            parts = [p for p in expr.split(',') if p != '']
+            try:
+                idxs = [int(p) for p in parts]
+            except ValueError:
+                return None
+            uniq = list(dict.fromkeys(idxs))  # 离散位置去重（保序），避免同一码被取两次
+            frag = ''
+            for i in uniq:
+                if i < -n or i >= n:
+                    return None
+                frag += code[i if i >= 0 else n + i]
+            # 提取结果再按字符去重（如单码字遇 0,-1 会得到 'aa'，应折叠为 'a'）
+            return ''.join(dict.fromkeys(frag))
+        if ':' in expr:
+            try:
+                sl = App._phrase_parse_slice(expr, n)
+            except (ValueError, TypeError):
+                return None
+            positions = list(range(n))[sl]
+            return ''.join(code[i] for i in positions)
+        try:
+            i = int(expr)
+        except ValueError:
+            return None
+        if i < -n or i >= n:
+            return None
+        return code[i if i >= 0 else n + i]
+
+    @staticmethod
+    def _phrase_char_fragments(ch, codes, code_expr):
+        """按 Q1 规则取单字候选片段：优先最长（两码优先、回退一码），同长多码全留"""
+        frags = set()
+        for code in codes:
+            f = App._phrase_eval_code_idx(code, code_expr)
+            if f is not None:
+                frags.add(f)
+        if not frags:
+            return []
+        maxlen = max(len(f) for f in frags)
+        return [f for f in frags if len(f) == maxlen]
+
+    @staticmethod
+    def _phrase_apply_rule(chars, tokens, table):
+        """对一组 token 求词组候选码（跨字笛卡尔积 + 整体去重保序）"""
+        token_results = []
+        for char_expr, code_expr in tokens:
+            positions = App._phrase_eval_char_idx(char_expr, chars)
+            if not positions:
+                return []
+            pos_frags = []
+            for p in positions:
+                ch = chars[p]
+                frags = App._phrase_char_fragments(ch, table.get(ch, []), code_expr)
+                if not frags:
+                    return []
+                pos_frags.append(frags)
+            token_strs = [''.join(comb) for comb in itertools.product(*pos_frags)]
+            token_results.append(token_strs)
+        final = [''.join(comb) for comb in itertools.product(*token_results)]
+        seen, deduped = set(), []
+        for f in final:
+            if f not in seen:
+                seen.add(f)
+                deduped.append(f)
+        return deduped
+
+    def _phrase_generate(self):
+        """主流程：解析单字表/规则组 → 逐词组剔除忽略字 → 范围匹配 → 生成或跳过。
+
+        返回 (out_lines, report)；若前置条件不满足返回 (None, 错误提示)。
+        """
+        table = self._phrase_parse_char_table()
+        if not table:
+            return None, '单字表为空或格式不正确（每行需为「单字 编码」，同字可多行）。'
+
+        parsed_groups = []
+        for line in self.txt_phrase_rule.get_content().splitlines():
+            s = line.strip()
+            if not s or s.startswith('#'):
+                continue
+            # 支持「范围 = 规则」（等号分隔，等号两侧空格可选）与旧式「范围 规则」（空格分隔）
+            if '=' in s:
+                r, rule = s.split('=', 1)
+                r, rule = r.strip(), rule.strip()
+            else:
+                parts = s.split(None, 1)
+                if len(parts) < 2:
+                    return None, f'规则行格式错误（需「范围 = 规则」）: {s}'
+                r, rule = parts[0], parts[1].strip()
+            if not rule:
+                return None, f'规则行格式错误（需「范围 = 规则」）: {s}'
+            try:
+                tokens = self._phrase_parse_rule(rule)
+            except Exception as e:
+                return None, f'规则解析失败: {rule}\n{e}'
+            parsed_groups.append((r, tokens))
+        if not parsed_groups:
+            return None, '请至少填写一组有效规则（范围 = 规则）。'
+
+        # 「忽略标点符号」勾选时忽略表生效（整框内容）；取消勾选则整张忽略表禁用、不忽略任何字符
+        ignore_chars = self.ignore_extra.get() if self.ignore_punct.get() else ''
+        translate_tbl = str.maketrans('', '', ignore_chars) if ignore_chars else None
+        allow_predef = self.allow_predef.get()
+
+        report = {'unmatched': {}, 'missing': {}, 'empty': 0,
+                  'predef': 0, 'generated': 0, 'failed': 0}
+        SAMPLE = 10
+        out_lines = []
+
+        # 待编码词组复用标准文件区右框（参考文件 → 词组编码下为「待编码词组」）
+        for raw in self.preview_r.get_content().splitlines():
+            stripped = raw.strip()
+            if not stripped or stripped.startswith('#'):
+                continue
+            # 拆分「词组 + 可选预定义编码」（首个空白符），无论是否允许预定义都先隔离，
+            # 不勾选时旧编码被忽略、按词组重新生成（即“替换原有”）。
+            parts = stripped.split(None, 1)
+            phrase_raw = parts[0]
+            predef = parts[1].strip() if len(parts) > 1 else ''
+            # 剔除忽略表字符（如标点）→ 得到真正参与编码的字数组
+            phrase = phrase_raw.translate(translate_tbl) if translate_tbl else phrase_raw
+            if not phrase:
+                report['empty'] += 1
+                continue
+            chars = list(phrase)  # 按 Unicode 字符切分（含扩展 B 正确）
+            length = len(chars)
+
+            # 允许预定义编码且本行带编码 → 原样保留（仅排序，不重新生成）
+            if allow_predef and predef:
+                out_lines.append(f'{phrase}\t{predef}')
+                report['predef'] += 1
+                continue
+
+            # 缺失字检测
+            miss = [c for c in chars if c not in table]
+            if miss:
+                key = ''.join(sorted(set(miss)))
+                bucket = report['missing'].setdefault(key, [0, []])
+                bucket[0] += 1
+                if len(bucket[1]) < SAMPLE:
+                    bucket[1].append(phrase)
+                continue
+
+            # 范围匹配（自上而下首个命中）
+            matched = None
+            for r, tokens in parsed_groups:
+                if self._phrase_match_range(length, r):
+                    matched = tokens
+                    break
+            if matched is None:
+                bucket = report['unmatched'].setdefault(length, [0, []])
+                bucket[0] += 1
+                if len(bucket[1]) < SAMPLE:
+                    bucket[1].append(phrase)
+                continue
+
+            # 生成候选码
+            candidates = self._phrase_apply_rule(chars, matched, table)
+            if not candidates:
+                report['failed'] += 1
+                continue
+            for cand in candidates:
+                out_lines.append(f'{phrase}\t{cand}')
+            report['generated'] += 1
+
+        return out_lines, report
 
 
 if __name__ == '__main__':
