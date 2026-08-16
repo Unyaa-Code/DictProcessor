@@ -1323,33 +1323,38 @@ class App:
         # 从而精确设定窗口高度：既不隐藏也不截断，切到任意模式底部提示都不会被挡。
         # 宽度适当放大以确保各操作括号描述完整显示。
         # 窗口已在 __init__ 开头 withdraw()，此处测量在隐藏状态下完成，定好尺寸后再显示。
-        h, w = self._measure_full()
+        content_h, w = self._measure_full()
+        # 状态栏钉在底部、始终可见；先以最长示例文本测出其最大高度，
+        # 避免处理完成后（含长路径）的多行提示被固定窗口高度裁掉
         self.status.pack(side='bottom', pady=4, fill='x')
-        self.root.update_idletasks()
-        w = min(max(w, 1080), 1400)          # 加宽，保证括号描述不被截断
-
-        # 用一条较长的示例文本测量状态栏高度，确保处理完成后（含长路径）的多行提示
-        # 不会被固定窗口高度裁掉；否则长提示换行后实际更高，底部提示会看不到
         self.status.config(wraplength=w - 20)
         self.status.config(
             text=('完成！共处理 9,999,999 行，匹配成功 9,999,999 行，失败 0 行。'
                   ' 已按匹配值降序排序。 参考文件有 99 处重复 Key（已保留首次值）。'
                   '\n结果已保存至: C:\\很长的目录名\\更长的子目录名\\输出结果文件.txt'))
         self.root.update_idletasks()
-        h = self.root.winfo_reqheight()
+        status_h = self.status.winfo_reqheight()
         self._update_status()  # 还原为当前真实的初始提示
 
-        # 高度上限按屏幕自适应，避免小屏被截断（同时不低于最小值）
-        # 这里扣掉任务栏估算高度，避免窗口底部被任务栏遮挡
-        taskbar = 48
-        max_h = max(560, self.root.winfo_screenheight() - taskbar - 20)
-        h = min(max(h, 560), max_h)
-        # 窗口水平居中、顶部紧贴屏幕边缘（避免竖直居中时被任务栏遮挡）
-        x = max(0, (self.root.winfo_screenwidth() - w) // 2)
-        y = 0
-        self.root.geometry(f'{w}x{h}+{x}+{y}')
+        # 窗口宽度：以内容自然宽度为准（保证描述完整显示），并限定合理区间；
+        # 额外 +18 像素留给滚动条。内容过宽时窗口也不会无限变宽（封顶 1400）。
+        w = min(max(w, 1080), 1400)
+        # 窗口高度：平时贴合（内容高度 + 状态栏高度）；但封顶到舒适高度 WIN_MAX_H，
+        # 超出则整页滚动，避免窗口被撑到接近整屏（之前“高度异常/顶部留白”的根因）。
+        WIN_MAX_H = 1400
+        max_h = max(560, self.root.winfo_screenheight() - 48 - 20)
+        h = content_h + status_h
+        h = min(max(h, 560), WIN_MAX_H, max_h)
+        # 窗口水平居中；顶部留 40px 余量（不再紧贴屏幕顶边），同时不进入底部任务栏范围
+        x = max(0, (self.root.winfo_screenwidth() - (w + 18)) // 2)
+        y = 40
+        self.root.geometry(f'{w + 18}x{h}+{x}+{y}')
         self.root.minsize(980, 560)
         self.root.deiconify()  # 尺寸已全部定好，再显示窗口，避免启动抖动
+        # 显式让内容区宽度跟随画布宽度（横向铺满、无右侧空隙），并刷新滚动区域
+        self.root.update_idletasks()
+        self._sync_content_width(self.canvas.winfo_width())
+        self.canvas.configure(scrollregion=self.canvas.bbox('all'))
         # 路径标签随窗口尺寸自动换行
         self.root.bind('<Configure>', lambda e: self._update_path_wrap())
         self._update_path_wrap()
@@ -1393,20 +1398,64 @@ class App:
         for row in self.option_rows.values():
             row.show(True)
         self.root.update_idletasks()
-        h = self.root.winfo_reqheight()
-        w = self.root.winfo_reqwidth()
+        # 内容已包进可滚动容器，量其内在高度/宽度即可（与状态栏无关）
+        h = self.content.winfo_reqheight()
+        w = self.content.winfo_reqwidth()
         for row in self.option_rows.values():
             row.show(False)
         self.status.pack_forget()
         return h, w
+
+    def _on_mousewheel(self, event):
+        """鼠标滚轮滚动整页；弹窗（Toplevel）内不拦截，由其自身处理"""
+        if event.widget.winfo_toplevel() is not self.root:
+            return
+        self.canvas.yview_scroll(int(-1 * (event.delta / 120)), 'units')
+
+    def _on_canvas_configure(self, event):
+        """画布尺寸变化时：内容区宽度跟随画布宽度（横向铺满），并刷新滚动区域"""
+        self._sync_content_width(event.width)
+        self.canvas.configure(scrollregion=self.canvas.bbox('all'))
+
+    def _on_content_configure(self, event):
+        """内容尺寸变化（如切换操作类型、显示/隐藏选项行）时刷新滚动区域"""
+        self.canvas.configure(scrollregion=self.canvas.bbox('all'))
+
+    def _sync_content_width(self, width):
+        """让可滚动内容区宽度铺满画布宽度，避免出现右侧空白"""
+        if width and width > 1:
+            self.canvas.itemconfigure(self._content_win, width=width)
 
     def _build_ui(self, text_font):
         pad = {'padx': 8, 'pady': 1}
         self._text_font = text_font
         self._ui_pad = pad
 
+        # ---- 整页滚动容器：除底部状态栏外的内容都放进可滚动区域，
+        #      窗口保持舒适高度，内容过高时整页纵向滚动，不再截断底部 ----
+        # 用一个容器框同时承载 canvas + 滚动条，避免 canvas 直接 expand 时
+        # 与底部状态栏争夺高度（会把状态栏压成 0 高、或令窗口高度异常）。
+        self.frm_scroll = ttk.Frame(self.root)
+        self.frm_scroll.pack(fill='both', expand=True)
+        self.canvas = tk.Canvas(self.frm_scroll, highlightthickness=0)
+        self.scrollbar = ttk.Scrollbar(
+            self.frm_scroll, orient='vertical', command=self.canvas.yview,
+            style='Preview.Vertical.TScrollbar')
+        self.canvas.configure(yscrollcommand=self.scrollbar.set)
+        self.content = ttk.Frame(self.canvas)
+        self._content_win = self.canvas.create_window(
+            (0, 0), window=self.content, anchor='nw')
+        self.scrollbar.pack(side='right', fill='y')
+        self.canvas.pack(side='left', fill='both', expand=True)
+        # 画布尺寸变化：让内部内容区宽度跟随画布宽度（横向铺满，不留右侧空隙），
+        # 并刷新滚动区域；内容尺寸变化也刷新滚动区域。
+        self.canvas.bind('<Configure>', self._on_canvas_configure)
+        self.content.bind('<Configure>', self._on_content_configure)
+        # 鼠标滚轮滚动整页（弹窗内不拦截，避免影响弹窗自身滚动）
+        self.canvas.bind_all('<MouseWheel>', self._on_mousewheel)
+
         # ---- 文件选择区（两个并排，预览框不互相挤压）----
-        self.frm_files = ttk.Frame(self.root, padding=4)
+        self.frm_files = ttk.Frame(self.content, padding=4)
         frm_files = self.frm_files
         # fill='x' 不 expand：文件区按内容高度紧凑显示，避免窗口变大时
         # 预览框被拉高导致下方出现大片无用空白；剩余空间交给结果预览区吸收。
@@ -1504,7 +1553,7 @@ class App:
         # 关于按钮用 place 定位到右侧，不参与 pack/grid 布局流，
         # 避免占用布局空间导致互换按钮居中计算偏移。
         # 关于按钮 width=6 与「清空」按钮等宽；行高由互换按钮决定，与原 pack 一致。
-        frm_act = ttk.Frame(self.root, padding=0)
+        frm_act = ttk.Frame(self.content, padding=0)
         frm_act.pack(fill='x', padx=8, pady=1)
         frm_act_inner = ttk.Frame(frm_act)
         frm_act_inner.pack(fill='x')
@@ -1515,7 +1564,7 @@ class App:
                    command=self._show_about).place(relx=1.0, rely=0.5, anchor='e')
 
         # ---- 选项 ----
-        self.frm_opt = ttk.LabelFrame(self.root, text='处理选项', padding=8)
+        self.frm_opt = ttk.LabelFrame(self.content, text='处理选项', padding=8)
         self.frm_opt.pack(fill='x', **pad)
 
         # 操作类型：3 行 3 列网格（无「操作类型:」标签，上方「处理选项」已提示）
@@ -1554,7 +1603,7 @@ class App:
             row.set_height(_max_row_h)
 
         # ---- 输出文件名（wordextract 模式下文案改为「输出文件夹名」）----
-        self.frm_out = ttk.Frame(self.root, padding=8)
+        self.frm_out = ttk.Frame(self.content, padding=8)
         frm_out = self.frm_out
         frm_out.pack(fill='x', **pad)
         self.lbl_out_name = ttk.Label(frm_out, text='输出文件名:')
@@ -1562,11 +1611,11 @@ class App:
         ttk.Entry(frm_out, textvariable=self.output_name, width=64).pack(side='left', padx=8)
         ttk.Button(frm_out, text='浏览…', command=self._browse_output).pack(side='left')
         # 保存位置提示：无内容时整体隐藏，避免残留空行
-        self.lbl_save_path = ttk.Label(self.root, textvariable=self.save_path_var,
+        self.lbl_save_path = ttk.Label(self.content, textvariable=self.save_path_var,
                                        foreground='gray')
 
         # ---- 执行 ----
-        self.frm_run = ttk.Frame(self.root)
+        self.frm_run = ttk.Frame(self.content)
         self.frm_run.pack(pady=8)
         ttk.Button(self.frm_run, text='开始处理', command=self._run).pack(side='left', padx=4)
         self.btn_open_output = ttk.Button(
@@ -1575,7 +1624,7 @@ class App:
         self.btn_open_output.pack(side='left', padx=4)
 
         # ---- 结果行数过滤 ----
-        self.frm_filter = ttk.Frame(self.root)
+        self.frm_filter = ttk.Frame(self.content)
         frm_filter = self.frm_filter
         frm_filter.pack(fill='x', padx=4, pady=(0, 4))
         vcmd = (self.root.register(self._validate_threshold), '%P')
@@ -1590,12 +1639,10 @@ class App:
         ttk.Label(frm_filter, text='行时，结果只输出到预览框中（不保存为文件）').pack(side='left')
         self.ent_threshold.bind('<FocusOut>', self._clamp_threshold)
 
-        # ---- 处理结果预览（与导入预览同高：8 行）----
-        # fill='both' + expand=True：吸收窗口剩余空间，让结果预览框随窗口变大而变高，
-        # 同时文件区保持紧凑，互换按钮行与处理选项自然上移。
-        self.frm_result = ttk.LabelFrame(self.root, text='处理结果预览', padding=8)
+        # ---- 处理结果预览（固定 6 行高，自带滚动条；整页滚动由外层画布负责）----
+        self.frm_result = ttk.LabelFrame(self.content, text='处理结果预览', padding=8)
         frm_result = self.frm_result
-        frm_result.pack(fill='both', expand=True, **pad)
+        frm_result.pack(fill='x', **pad)
         self.lbl_result_lines = ttk.Label(frm_result, text='', foreground='gray')
         # 初始无结果，先隐藏，避免占位留白（有结果后由 _set_result_lines 显示）
         self.lbl_result_lines.pack_forget()
