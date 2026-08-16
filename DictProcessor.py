@@ -3017,6 +3017,12 @@ class App:
         # 默认填充五笔规则
         self.txt_phrase_rule.set_content(PHRASE_PRESETS['五笔规则'])
 
+        # 「?」帮助按钮：点击弹出规则语法说明（“生成规则”标签点击为其冗余入口）
+        self.btn_rule_help = ttk.Button(
+            frm_left, text='？', width=2,
+            command=self._show_phrase_rule_help)
+        self.btn_rule_help.pack(side='left', padx=(4, 0))
+
         # 右侧：两行控件（与左侧等高）
         frm_right = ttk.Frame(frm_left)
         frm_right.pack(side='left', fill='y', padx=(12, 0))
@@ -3448,17 +3454,17 @@ class App:
             parts = stripped.split(None, 1)
             phrase_raw = parts[0]
             predef = parts[1].strip() if len(parts) > 1 else ''
-            # 剔除忽略表字符（如标点）→ 得到真正参与编码的字数组
-            phrase = phrase_raw.translate(translate_tbl) if translate_tbl else phrase_raw
-            if not phrase:
+            # 输出词组名保留原始文字（含标点）；忽略表只作用于"取码用的字数组"
+            phrase_code = phrase_raw.translate(translate_tbl) if translate_tbl else phrase_raw
+            if not phrase_code:
                 report['empty'] += 1
                 continue
-            chars = list(phrase)  # 按 Unicode 字符切分（含扩展 B 正确）
+            chars = list(phrase_code)  # 按 Unicode 字符切分（含扩展 B 正确）
             length = len(chars)
 
             # 允许预定义编码且本行带编码 → 原样保留（仅排序，不重新生成）
             if allow_predef and predef:
-                out_lines.append(f'{phrase}\t{predef}')
+                out_lines.append(f'{phrase_raw}\t{predef}')
                 report['predef'] += 1
                 continue
 
@@ -3469,7 +3475,7 @@ class App:
                 bucket = report['missing'].setdefault(key, [0, []])
                 bucket[0] += 1
                 if len(bucket[1]) < SAMPLE:
-                    bucket[1].append(phrase)
+                    bucket[1].append(phrase_raw)
                 continue
 
             # 范围匹配（自上而下首个命中）
@@ -3482,7 +3488,7 @@ class App:
                 bucket = report['unmatched'].setdefault(length, [0, []])
                 bucket[0] += 1
                 if len(bucket[1]) < SAMPLE:
-                    bucket[1].append(phrase)
+                    bucket[1].append(phrase_raw)
                 continue
 
             # 生成候选码
@@ -3491,7 +3497,7 @@ class App:
                 report['failed'] += 1
                 continue
             for cand in candidates:
-                out_lines.append(f'{phrase}\t{cand}')
+                out_lines.append(f'{phrase_raw}\t{cand}')
             report['generated'] += 1
 
         return out_lines, report
