@@ -27,7 +27,7 @@ else:
     CJK_FONT = 'Noto Sans CJK SC'
 
 # 应用版本号（关于页、GitHub Actions 打包均引用此值）
-APP_VERSION = '1.3.1'
+APP_VERSION = '1.4.0'
 
 # Windows 高分屏 DPI 感知，避免 GUI 模糊
 # ctypes.windll 仅 Windows 存在，try/except 捕获后其他平台静默跳过
